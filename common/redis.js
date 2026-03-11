@@ -152,6 +152,30 @@ async function safeTtl(key) {
   }
 }
 
+async function safeDelPattern(pattern) {
+  try {
+    const client = getRedisClient();
+    if (!client) return 0;
+    let cursor = 0;
+    let deleted = 0;
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, { match: pattern, count: 200 });
+      cursor = parseInt(nextCursor, 10);
+      if (keys && keys.length > 0) {
+        await client.del(...keys);
+        deleted += keys.length;
+      }
+    } while (cursor !== 0);
+    if (deleted > 0) {
+      console.log(`[Redis] DEL pattern "${pattern}" — removed ${deleted} key(s)`);
+    }
+    return deleted;
+  } catch (err) {
+    console.error('[Redis] DEL pattern error:', err.message);
+    return 0;
+  }
+}
+
 async function testConnection() {
   try {
     const client = getRedisClient();
@@ -168,6 +192,7 @@ module.exports = {
   safeGet,
   safeSet,
   safeDel,
+  safeDelPattern,
   safeIncr,
   safeExpire,
   safeSadd,
