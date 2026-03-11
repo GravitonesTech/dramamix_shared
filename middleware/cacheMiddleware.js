@@ -1,4 +1,4 @@
-const { safeGet, safeSet } = require('../common/redis');
+const { safeGet, safeSet, safeDelPattern } = require('../common/redis');
 
 function cacheMiddleware(options = {}) {
   const {
@@ -48,8 +48,19 @@ function cacheMiddleware(options = {}) {
   };
 }
 
-function invalidateCache(pattern) {
-  return async (req, res, next) => {
+function invalidateCache(...prefixes) {
+  const prefixList = prefixes.flat();
+  return (req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = (data) => {
+      const result = originalJson(data);
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        Promise.allSettled(
+          prefixList.map(p => safeDelPattern(`${p}:*`))
+        ).catch(() => {});
+      }
+      return result;
+    };
     next();
   };
 }
