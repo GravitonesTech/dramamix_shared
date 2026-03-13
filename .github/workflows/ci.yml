@@ -26,3 +26,5 @@ jobs:
 
       - name: Run tests
         run: npm test --if-present
+        env:
+          NODE_ENV: test
