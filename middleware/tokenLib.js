@@ -3,6 +3,69 @@ const ALGO = 'sha256';
 const jwt = require('jsonwebtoken');
 const jwkToPem = require('jwk-to-pem');
 
+// ---------------------------------------------------------------------------
+// Key loading — runs once at module startup.
+// Services that sign tokens (user-service, admin-service) must set JWT_PRIVATE_KEY_JSON.
+// All services must set JWT_PUBLIC_KEY_JSON (or set JWT_PRIVATE_KEY_JSON, from which
+// the public key is derived automatically).
+// REFRESH_TOKEN_SECRET is required — no fallback. Set it in AWS Secrets Manager.
+// ---------------------------------------------------------------------------
+
+let _privateJwk = null;
+let _publicJwk  = null;
+
+function _loadKeys() {
+  if (process.env.JWT_PRIVATE_KEY_JSON) {
+    try {
+      _privateJwk = JSON.parse(process.env.JWT_PRIVATE_KEY_JSON);
+    } catch (e) {
+      console.error('[tokenLib] FATAL: JWT_PRIVATE_KEY_JSON is set but is not valid JSON — cannot start.');
+      process.exit(1);
+    }
+  }
+
+  if (process.env.JWT_PUBLIC_KEY_JSON) {
+    try {
+      _publicJwk = JSON.parse(process.env.JWT_PUBLIC_KEY_JSON);
+    } catch (e) {
+      console.error('[tokenLib] FATAL: JWT_PUBLIC_KEY_JSON is set but is not valid JSON — cannot start.');
+      process.exit(1);
+    }
+  } else if (_privateJwk) {
+    const { d, p, q, dp, dq, qi, ...pub } = _privateJwk;
+    _publicJwk = pub;
+  }
+
+  if (!_publicJwk) {
+    if (process.env.NODE_ENV === 'test') {
+      console.warn('[tokenLib] JWT keys not set — running in test mode with null keys. Mock this module in tests that use token functions.');
+    } else {
+      console.error('[tokenLib] FATAL: Neither JWT_PUBLIC_KEY_JSON nor JWT_PRIVATE_KEY_JSON is set. Cannot validate tokens.');
+      process.exit(1);
+    }
+  }
+}
+
+_loadKeys();
+
+// ---------------------------------------------------------------------------
+// Refresh token secret — required, no fallback.
+// ---------------------------------------------------------------------------
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET;
+if (!REFRESH_TOKEN_SECRET) {
+  if (process.env.NODE_ENV === 'test') {
+    console.warn('[tokenLib] REFRESH_TOKEN_SECRET not set — running in test mode. Mock this module in tests that use refresh tokens.');
+  } else {
+    console.error('[tokenLib] FATAL: REFRESH_TOKEN_SECRET environment variable is not set — cannot start.');
+    process.exit(1);
+  }
+}
+const REFRESH_TOKEN_EXPIRY = '7d';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 const log = async (message, level, source, context, request, response) => {
   try {
     let log = {
@@ -26,60 +89,40 @@ const log = async (message, level, source, context, request, response) => {
 };
 
 const encrypt = (textString, salt) => {
-        const hashedPassword = crypto.createHmac(ALGO, salt)
-                .update(textString)
-                .digest('hex');
-        return hashedPassword;
-}
-
-const validateToken = function (token) {
-        try {
-                const jwk = {
-                        "kty": "RSA",
-                        "e": "AQAB",
-                        "use": "sig",
-                        "kid": "IF6ivQOfJtHgHv8BKBOYxZF_LTwRZHj-PldPpMvswyk",
-                        "alg": "RS256",
-                        "n": "lI1U9zISbdb26sWHEfKG7-LVBzrXYDh40Voq2wTT-a_gzFmEQJMDIIDOxVMNj1U372bKeSzk2gla1p0wJxPkNtR_JGzPnp9rIsA6uRk6k3-l01Rn_zxNK6EE_zoZVZ6N3IGjV-CIwcRGzOL4p9_gdgEuLqOCBbkgtz8Ak3cAcu_EWGZVx2duK4gIJa6hNRKAs9u-SilTPpQTZ_-cHyYmiAGuMQoXAst-j7e5qiDklHwCOsFRbWhiXG115YJw0w80BsXVWbZ4hVjYwgDv0Armsz99A4TzpHrsShw8E5da-digeO9Ae-J2wRkqb8HDTLEg4QKo48m-8wL79NT_uL1ETw"
-                };
-                const pem = jwkToPem(jwk);
-                let decoded = jwt.verify(token, pem, { algorithms: ['RS256'] });
-                return decoded;
-        } catch (error) {
-                return false;
-        }
-}
-
-const generateToken = (userdata) => {
-        try {
-                const jwk = {
-                        "p": "xBryXJbg1dx50QFXCpzk-raVNsWwJ-Q9tU3uLf4Tc693Md6u8M-erQR2QjRaNfI_tq69Y2MQeQZEmKXKRbhi2plPYB6glEI_nPr61NrdfEzCEz52jdHmqoRFnST_Wovoxxjt1gQUg7v3IKInlszpb49n0uuRdmgI3B2y4y7eMsM",
-                        "kty": "RSA",
-                        "q": "wexNjM1jCOgHu_DV71vlsLkCwsK1UiHXm9XApV3R3EPXvpYXH2m3kLlMuL59UIWckSb93BHd-5K8xDhdK2E49x7c-hqUAs30pU6jhPzSxXKZuwDOq5Ou7yfz63u-hmS8djVooRe73WTGDrUOORl7-PSPDFw1VcT7Wd5tBrO3N4U",
-                        "d": "EQQbbnFi4QgVopDbxveD82iFRF2-G_x8AmcUr5_e9CPsWRwL5SWx3wBCLyIzVG7LiHW6zaSR1lPp_tlkkaVap9kxcyevpJjYOdPRJjC4n_qoMQvjGb57jHrWSrIKAt-1mkOTRVan86IbBg8dsoUXfgzmkFsUYrlxAOyLkVi5SXD23G7NTZHeNEvuwtigImyMBlTI7fUUJb-HWzHxvUPpEIFk8HLOYDc5JJOnYPFbgWXegQHv_wlgbdktCMWos0J_SUeVbgTSoYt-XO3WBevEJ1e2Ri6Sk-_KxeEY8xfsPa-QNWno70NDDOpcWdR2HgqgZLAb-O3xhzKG1NVRWgWYmQ",
-                        "e": "AQAB",
-                        "use": "sig",
-                        "kid": "IF6ivQOfJtHgHv8BKBOYxZF_LTwRZHj-PldPpMvswyk",
-                        "qi": "XoLwKMHTfb59tZtM_tKVVy0VgSi6Pfsh2USSNf80tdOc7xH0hjoxCqBr11RHzZBdtwBybzQbNLNzhxuYM6Br00n1zeRpJOUf3Be_OkF0NOugW__RJ2ev9ENywAhZhoYaCNIEhd3NMXCDKHwC24aLE1WF5HNw5_ItyyzSC0zMNa0",
-                        "dp": "DHNtieVmdw2dimCcZycY_rYS-TxJ9-5s4JMHGVJ1Z7XvSnJKBy4XdALBg2iRhbVQyEeF7MaAaD62oj58fjq7xAdR29d1-JPQOCZTQKp4v4icFd60ZkK6c38ccGLF97jEWcfCagEuUELh6OeCvfdapuOjAuhD_xGR5m_YSMZUA0M",
-                        "alg": "RS256",
-                        "dq": "o4gENbKVy1LwArsrjbfvUEIUY-0SPvqu-Ykd9dXSPW8wplWnliPuWqsIWdq5joe96mH5PfYLPjUV3lqxpv1LrolmS7rSCjNoFWblWiZiD4N-xEYAAox9vsvwVCp8FpUooH6VhxOepypuIsToA5rMArspToELsRJ16-k4A6jV3ok",
-                        "n": "lI1U9zISbdb26sWHEfKG7-LVBzrXYDh40Voq2wTT-a_gzFmEQJMDIIDOxVMNj1U372bKeSzk2gla1p0wJxPkNtR_JGzPnp9rIsA6uRk6k3-l01Rn_zxNK6EE_zoZVZ6N3IGjV-CIwcRGzOL4p9_gdgEuLqOCBbkgtz8Ak3cAcu_EWGZVx2duK4gIJa6hNRKAs9u-SilTPpQTZ_-cHyYmiAGuMQoXAst-j7e5qiDklHwCOsFRbWhiXG115YJw0w80BsXVWbZ4hVjYwgDv0Armsz99A4TzpHrsShw8E5da-digeO9Ae-J2wRkqb8HDTLEg4QKo48m-8wL79NT_uL1ETw"
-                };
-
-                const pem = jwkToPem(jwk, { private: true });
-                const token = jwt.sign({ userdata }, pem, { algorithm: "RS256", expiresIn: `${process.env.TOKEN_EXPIRATION || '3600'}s`, });
-
-                return { accessToken: token, expiresIn: process.env.TOKEN_EXPIRATION }
-        } catch (error) {
-                let errorLog = error.stack ? error.stack : (error.message ? error.message : "");
-                console.log("Error calling generate token", "error", "generate token", errorLog);
-                throw error;
-        }
+  const hashedPassword = crypto.createHmac(ALGO, salt)
+    .update(textString)
+    .digest('hex');
+  return hashedPassword;
 };
 
-const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'dramamix-refresh-secret-fallback-change-in-production';
-const REFRESH_TOKEN_EXPIRY = '7d';
+const validateToken = function (token) {
+  try {
+    const pem = jwkToPem(_publicJwk);
+    let decoded = jwt.verify(token, pem, { algorithms: ['RS256'] });
+    return decoded;
+  } catch (error) {
+    return false;
+  }
+};
+
+const generateToken = (userdata) => {
+  if (!_privateJwk) {
+    throw new Error('[tokenLib] generateToken requires JWT_PRIVATE_KEY_JSON — this service is not configured to issue tokens.');
+  }
+  try {
+    const pem = jwkToPem(_privateJwk, { private: true });
+    const token = jwt.sign(
+      { userdata },
+      pem,
+      { algorithm: 'RS256', expiresIn: `${process.env.TOKEN_EXPIRATION || '3600'}s` }
+    );
+    return { accessToken: token, expiresIn: process.env.TOKEN_EXPIRATION };
+  } catch (error) {
+    let errorLog = error.stack ? error.stack : (error.message ? error.message : '');
+    console.log('Error calling generate token', 'error', 'generate token', errorLog);
+    throw error;
+  }
+};
 
 const generateRefreshToken = (userId) => {
   try {
@@ -106,9 +149,9 @@ const validateRefreshToken = (token) => {
 };
 
 module.exports = {
-        encrypt,
-        generateToken,
-        validateToken,
-        generateRefreshToken,
-        validateRefreshToken,
+  encrypt,
+  generateToken,
+  validateToken,
+  generateRefreshToken,
+  validateRefreshToken,
 };
